@@ -1,15 +1,15 @@
 import typer
 import sys
-from typing_extensions import Annotated, Optional
+from typing_extensions import Annotated
 from rich import print
 from rich.progress import Progress
 from utils.config import Config
 from utils.console import Console
-from utils.download import Downloader
+from utils.downloader import Downloader
 from urllib import parse
 import random
 
-sys.argv = ["main.py","download"]
+sys.argv = ["main.py", "download", "https://app.send.hanloth.cn/download/PC/one/one.zip"]
 app = typer.Typer()
 
 @app.command("")
@@ -17,7 +17,7 @@ def version():
     """
     Show the version of the Application
     """
-    print(f"Downloader CLI version: v0.1.0")
+    print("Downloader CLI version: v0.1.0")
     
 class DownloadInterface:
     def __init__(self,noStyle:bool):
@@ -78,7 +78,7 @@ def download(
     if not noConfig:
         Config.loadConfig()
     
-    if (url==None and listFile==None) or (url and listFile):
+    if (url is None and listFile is None) or (url and listFile):
         console.error("Please enter the URL or provide the list file path of a set of links.")
         return
     
@@ -90,12 +90,11 @@ def download(
         try:
             with open(listFile,"r") as f:
                 urls=f.readlines()
-        except:
+        except Exception:
             console.error("The file path is not correct.")
             return
     
     d.download(urls,output,noConfig)
-
 
 @app.command("config")
 def config():
