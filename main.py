@@ -5,7 +5,7 @@ from rich import print
 from rich.progress import Progress
 from utils.config import Config
 from utils.console import Console
-from utils.downloader import Downloader
+from utils.download import Downloader
 from urllib import parse
 import random
 
