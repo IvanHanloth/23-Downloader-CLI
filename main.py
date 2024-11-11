@@ -40,17 +40,17 @@ class DownloadInterface:
             info={
                 "id":id,
                 "url":url,
-                "filename":filename,
+                "file_name":filename,
                 "directory":output,
                 "config":{
 
                 }
             }
-            d.add_url(info)
+            
             self.tasks.append(id)
             self.progresses[id] = self.progress.add_task("[red]Downloading...", total=100)
             
-            d.start()
+            d.start(info)
 
 
     def ErrorCallback(self,data):
