@@ -3,7 +3,6 @@ import platform
 import json
 
 class GlobalConfig:
-
     def __init__(self):
         self.loadDefaulConfig()
         self.loadConfig()
