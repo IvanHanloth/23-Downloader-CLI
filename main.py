@@ -9,7 +9,7 @@ from utils.download import Downloader
 from urllib import parse
 import random
 
-sys.argv = ["main.py", "download", "https://app.send.hanloth.cn/download/PC/one/one.zip"]
+sys.argv = ["main.py", "download","-u", "https://app.send.hanloth.cn/download/PC/one/one.zip"]
 app = typer.Typer()
 
 @app.command("")
@@ -32,7 +32,8 @@ class DownloadInterface:
         Download a file from a URL
         """
         self.console.info(f"Downloading {len(urls)} file(s)...")
-        d=Downloader(onProgress=self.ProgressCallback,onError=self.ErrorCallback,onFinish=self.FinishCallback)
+        # d=Downloader(onProgress=self.ProgressCallback,onError=self.ErrorCallback,onFinish=self.FinishCallback)
+        d=Downloader()
         for url in urls:
             id=random.randint(100000,999999)
             filename=parse.urlparse(url).path.split("/")[-1]
