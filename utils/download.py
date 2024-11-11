@@ -1,24 +1,16 @@
 import os
 import time
-import json
 import requests
 from requests.adapters import HTTPAdapter
-# from typing import Optional
+from typing import Optional
 
 from utils.config import Config
 from utils.tools import get_header, get_proxy, get_auth, format_size
 from utils.thread import Thread, ThreadPool
-from utils.error import *
 
 class Downloader:
-    def __init__(self, onProgress, onError, onFinish):
-        # self.onStartCallback=onStart
-
-        self.onProgressCallback=onProgress
-
-        self.onErrorCallback=onError
-
-        self.onFinishCallback=onFinish
+    def __init__(self, info):
+        self.info = info
 
         self.init_utils()
 
@@ -28,7 +20,7 @@ class Downloader:
         self.completed_size = 0
 
         # 创建监听线程
-        self.listen_thread = Thread(target = self.onListen, name = "ListenThread", daemon = True)
+        self.listen_thread = Thread(target = self.onListen, name = "ListenThread")
 
         # 创建持久化 Session
         self.session = requests.Session()
@@ -42,165 +34,93 @@ class Downloader:
         # 初始化停止标志位，包含监听线程停止标志位和分片下载停止标志位
         self.stop_flag = False
         self.range_stop_flag = False
-
-        # 初始化错误标志位 + 下载完成标志位
-        self.error_flag = False
         self.finish_flag = False
-
-        # 初始化重试计数器
-        self.retry_count = 0
 
         self.thread_info = {}
         self.thread_alive_count = 0
-
-        self.download_list = []
-
-        # self.download_info = DownloaderInfo()
-
-        # if not self.info["flag"]:
-        #     self.download_info.init_info(self.info)
-        # else:
-        #     # 断点续传，直接读取数据
-        #     contents = self.download_info.read_info()
-        #     base_info = contents[str(self.info["id"])]["base_info"]
-        #     thread_info = contents[str(self.info["id"])]["thread_info"]
-
-        #     self.download_info.id = self.download_id = base_info["id"]
-
-        #     if base_info["total_size"]:
-        #         self.total_size = base_info["total_size"]
-        #         self.completed_size = self.download_info.calc_completed_size(self.total_size, thread_info)
-        #         self.thread_info = contents[str(self.info["id"])]["thread_info"]
-
+        
     def add_url(self, info: dict):
-        """
-        info:{
-            id:下载id,
-            url:下载链接,
-            file_name:文件名,
-            directory:保存路径,
-            config:{
-                referer_url:请求头referer,
-                max_thread:最大线程数,
-                proxy:代理,
-                auth:代理认证,
-                timeout:超时时间,
-                speed_limit:限速(Mb),
-            }
-        }
-        """
-        path = os.path.join(info["directory"], info["file_name"])
+        path = os.path.join(Config.Download.path, info["file_name"])
 
-        info["path"] = path
-
-        self.download_list.append(info)
-
-        file_size = self.get_total_size(info)
-
-        self.total_size += file_size
-
-        if not file_size:
-            # 无效链接
-            raise NotValidURL()
-
-        chunk_list = self.get_chunk_list(file_size, info["config"]["max_thread"])
-
+        self.total_size = self.get_total_size(info["url"], info["referer_url"], path)
+        
+        # 音频文件较小，使用 2 线程下载
+        chunk_list = self.get_chunk_list(self.total_size, Config.Download.max_thread_count)
         self.thread_alive_count += len(chunk_list)
 
         for index, chunk_list in enumerate(chunk_list):
+            url, referer_url, temp = info["url"], info["referer_url"], info.copy()
 
-            temp = info.copy()
-
-            thread_id = f"{info['id']}_{index + 1}"
-
+            thread_id = f"{info['type']}_{info['id']}_{index + 1}"
             temp["chunk_list"] = chunk_list
-
             self.thread_info[thread_id] = temp
 
-            # self.download_id = info["id"]
+            self.download_id = info["id"]
             
-            self.ThreadPool.submit(self.range_download, args = (thread_id, temp))
+            self.ThreadPool.submit(self.range_download, args = (thread_id, url, referer_url, path, chunk_list,))
 
-    def start(self):
+    def start(self, info: dict):
+        # 添加下载链接
+        self.add_url(info)
+
+        # 开启线程池和监听线程
         self.ThreadPool.start()
         self.listen_thread.start()
 
-    # def restart(self):
-    #     # 重置停止线程标志位
-    #     self.stop_flag = False
-    #     self.range_stop_flag = False
+    def restart(self):
+        # 重置停止线程标志位
+        self.stop_flag = False
+        self.range_stop_flag = False
 
-    #     # 重置重试计数器
-    #     self.retry_count = 0
+        for key, entry in self.thread_info.items():
+            path, chunk_list = os.path.join(Config.Download.path, entry["file_name"]), entry["chunk_list"]
 
-    #     for key, entry in self.thread_info.items():
-    #         path, chunk_list = os.path.join(Config.download["path"], entry["file_name"]), entry["chunk_list"]
+            if chunk_list[0] >= chunk_list[1]:
+                continue
 
-    #         if chunk_list[0] >= chunk_list[1]:
-    #             continue
-
-    #         # 重新下载前检查链接是否有效
-    #         total_size = self.get_total_size(entry["url"], entry["referer_url"]) 
-
-    #         self.ThreadPool.submit(target = self.range_download, args = (key, durl, entry["referer_url"], path, chunk_list,))
-    #         self.thread_alive_count += 1
+            self.ThreadPool.submit(target = self.range_download, args = (key, self.info["url"], entry["referer_url"], path, chunk_list,))
+            self.thread_alive_count += 1
         
-    #     self.ThreadPool.start()
+        self.ThreadPool.start()
 
-    def range_download(self, thread_id:int, info: dict):
+    def range_download(self, thread_id: str, url: str, referer_url: str, path: str, chunk_list: list):
         # 分片下载
-        try:
-            """
-            下载文件部分！！！！！！！！！
-            """
-            req = self.session.get(info["url"],
-                                    headers = info["header"],
-                                    stream = True,
-                                    proxies = info["config"]["proxy"],
-                                    auth = info["config"]["auth"],
-                                    timeout = info["config"]["timeout"])
-            
-            with open(info["path"], "rb+") as f:
-                start_time = time.time()
-                chunk_size = 8192
-                speed_limit = info["config"]["speed_limit"] * 1024 * 1024
-                f.seek(info["chunk_list"][0])
-
-                for threadCount in req.iter_content(chunk_size = chunk_size):
-                    if threadCount:
-                        if self.range_stop_flag:
-                            # 检测分片下载停止标志位
-                            break
-
-                        f.write(threadCount)
-                        f.flush()
-
-                        self.completed_size += len(threadCount)
-
-                        self.thread_info[thread_id]["chunk_list"][0] += len(threadCount)
-
-                        if self.completed_size >= self.total_size:
-                            # 下载完成，置停止分片下载标志位为 True，下载完成标志位为 True
-                            self.range_stop_flag = True
-                            self.finish_flag = True
-
-                        # 计算执行时间
-                        elapsed_time = time.time() - start_time
-                        expected_time = chunk_size / (speed_limit / self.thread_alive_count)
-
-                        if elapsed_time < 1 and info["config"]['speed_limit']:
-                            # 计算应暂停的时间，从而限制下载速度
-                            time.sleep(max(0, expected_time - elapsed_time))
-
-                        start_time = time.time()
-
-        except Exception:
-            # 置错误标志位为 True
-            self.error_flag = True
-
-            # 抛出异常，停止线程
-            raise requests.exceptions.ConnectionError()
+        req = self.session.get(url, headers = get_header(referer_url, Config.User.sessdata, chunk_list), stream = True, proxies = get_proxy(), auth = get_auth(), timeout = 15)
         
+        with open(path, "rb+") as f:
+            start_time = time.time()
+            chunk_size = 8192
+            speed_limit = Config.Download.speed_limit_in_mb * 1024 * 1024
+            f.seek(chunk_list[0])
+
+            for chunk in req.iter_content(chunk_size = chunk_size):
+                if chunk:
+                    if self.range_stop_flag:
+                        # 检测分片下载停止标志位
+                        break
+
+                    f.write(chunk)
+                    f.flush()
+
+                    self.completed_size += len(chunk)
+
+                    self.thread_info[thread_id]["chunk_list"][0] += len(chunk)
+
+                    if self.completed_size >= self.total_size:
+                        # 下载完成，置停止分片下载标志位为 True，下载完成标志位为 True
+                        self.range_stop_flag = True
+                        self.finish_flag = True
+
+                    # 计算执行时间
+                    elapsed_time = time.time() - start_time
+                    expected_time = chunk_size / (speed_limit / self.thread_alive_count)
+
+                    if elapsed_time < 1 and Config.Download.speed_limit:
+                        # 计算应暂停的时间，从而限制下载速度
+                        time.sleep(max(0, expected_time - elapsed_time))
+
+                    start_time = time.time()
+
         self.thread_alive_count -= 1
 
     def onListen(self):
@@ -221,21 +141,8 @@ class Downloader:
                 "raw_completed_size": self.completed_size
             }
 
-            if speed == "0 KB/s":
-                self.retry_count += 1
-
-            if self.retry_count == 5:
-                self.onStop()
-
-                # self.restart()
-
             if self.stop_flag:
                 # 检测停止标志位
-                break
-
-            if self.error_flag:
-                # 检测错误标志位，回调下载失败函数
-                self.onError()
                 break
 
             if self.finish_flag:
@@ -243,25 +150,18 @@ class Downloader:
                 self.stop_flag = True
                 self.onFinished()
                 break
-            
-            # self.update_download_info()
-
-            self.onProgressCallback(info)
 
     def onPause(self):
         # 暂停下载
         self.onStop()
 
-        # self.update_download_info()
+    def onResume(self):
+        # 恢复下载
+        self.restart()
 
-    # def onResume(self):
-    #     # 恢复下载
-    #     self.restart()
-
-    #     # 启动监听线程
-    #     self.listen_thread = Thread(target = self.onListen, name = "ListenThread")
-
-    #     self.listen_thread.start()
+        # 启动监听线程
+        self.listen_thread = Thread(target = self.onListen, name = "ListenThread")
+        self.listen_thread.start()
 
     def onStop(self):
         # 停止下载
@@ -269,53 +169,34 @@ class Downloader:
         self.stop_flag = True
 
         self.ThreadPool.stop()
+        self.session.close()
 
     def onFinished(self):
-        # 下载完成，关闭所有线程，回调 onMerge 进行合成
+        # 下载完成，关闭所有线程
         self.stop_flag = True
-        self.onFinishCallback()
     
-    def onError(self):
-        # 关闭线程池和监听线程，停止下载
-        self.onStop()
+    def get_total_size(self, url: str, referer_url: str, path: Optional[str] = None):
+        req = self.session.head(url, headers = get_header(referer_url))
 
-        # 回调 panel 下载失败函数，终止下载
-        self.onErrorCallback()
-    
-    def get_total_size(self, info):
-        headers = self.get_header_info(info["url"], info["referer_url"])
-
-        # 检测 headers 是否包含 Content-Length
-        if "Content-Length" not in headers:
-            # 无效链接
-            return None
-
-        total_size = int(headers["Content-Length"])
+        total_size = int(req.headers["Content-Length"])
 
         # 当 path 不为空时，才创建本地空文件
-        if info["path"]:
-            with open(info["path"], "wb") as f:
+        if path:
+            with open(path, "wb") as f:
                 # 使用 seek 方法，移动文件指针，快速有效，完美解决大文件创建耗时的问题
                 f.seek(total_size - 1)
                 f.write(b"\0")
         
-        # 返回文件大小
         return total_size
-    
-    def get_header_info(self, url: str, referer_url: str):
-        # 获取链接 headers 信息
-        req = self.session.head(url, headers = get_header(referer_url))
 
-        return req.headers
-
-    def get_chunk_list(self, total_size: int, threadCount: int) -> list:
+    def get_chunk_list(self, total_size: int, thread_count: int) -> list:
         # 计算分片下载区间
-        piece_size = int(total_size / threadCount)
+        piece_size = int(total_size / thread_count)
         chunk_list = []
 
-        for i in range(threadCount):
+        for i in range(thread_count):
             start = i * piece_size + 1 if i != 0 else 0 
-            end = (i + 1) * piece_size if i != threadCount - 1 else total_size
+            end = (i + 1) * piece_size if i != thread_count - 1 else total_size
 
             chunk_list.append([start, end])
 
@@ -323,119 +204,3 @@ class Downloader:
 
     def format_speed(self, speed: int) -> str:
         return "{:.1f} MB/s".format(speed / 1024) if speed > 1024 else "{:.1f} KB/s".format(speed) if speed > 0 else "0 KB/s"
-    
-    # def update_download_info(self):
-    #     self.download_info.update_thread_info(self.thread_info, self.completed_size)
-
-    # def update_total_size(self, total_size):
-    #     self.download_info.update_base_info_total_size(total_size)
-
-# class DownloaderInfo:
-#     def __init__(self):
-#         # 下载信息类，用于断点续传
-#         self.path = os.path.join(os.getcwd(), "download.json")
-    
-#     def check_file(self):
-#         if not os.path.exists(self.path):
-#             contents = {}
-
-#             self.write(contents)
-
-#     def read_info(self):
-#         self.check_file()
-        
-#         with open(self.path, "r", encoding = "utf-8") as f:
-#             try:
-#                 return json.loads(f.read())
-            
-#             except Exception:
-#                 return {}
-    
-#     def init_info(self, info):
-#         self.id = info["id"]
-#         contents = self.read_info()
-
-#         contents[str(info["id"])] = {
-#                 "base_info": info,
-#                 "thread_info": {}
-#             }
-        
-#         self.write(contents)
-        
-#     def update_thread_info(self, thread_info, completed_size):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["thread_info"] = thread_info
-#             contents[f"{self.id}"]["base_info"]["completed_size"] = completed_size
-
-#             self.write(contents)
-
-#     def update_base_info(self, base_info):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["base_info"]["size"] = base_info["size"]
-#             contents[f"{self.id}"]["base_info"]["video_codec"] = base_info["video_codec"]
-#             contents[f"{self.id}"]["base_info"]["complete"] = base_info["complete"]
-#             contents[f"{self.id}"]["base_info"]["video_quality"] = base_info["video_quality"]
-            
-#             self.write(contents)
-
-#     def update_base_info_progress(self, progress, complete):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["base_info"]["progress"] = progress
-#             contents[f"{self.id}"]["base_info"]["complete"] = complete
-
-#             self.write(contents)
-
-#     def update_base_info_status(self, status):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["base_info"]["status"] = status
-
-#             self.write(contents)
-
-#     def update_base_info_total_size(self, total_size):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["base_info"]["total_size"] = total_size
-
-#             self.write(contents)
-
-#     def update_base_info_download_complete(self, status: bool):
-#         contents = self.read_info()
-
-#         if f"{self.id}" in contents:
-#             contents[f"{self.id}"]["base_info"]["download_complete"] = status
-
-#             self.write(contents)
-
-#     def write(self, contents):
-#         with open(self.path, "w", encoding = "utf-8") as f:
-#             f.write(json.dumps(contents, ensure_ascii = False))
-    
-#     def clear(self):
-#         contents = self.read_info()
-
-#         id_string = str(self.id)
-
-#         if id_string in contents:
-#             contents.pop(id_string)
-
-#         self.write(contents)
-    
-#     def calc_completed_size(self, total_size, thread_info):
-        uncompleted_size = 0
-
-        for key, thread_entry in thread_info.items():
-            chunk_list = thread_entry["chunk_list"]
-
-            if chunk_list[0] < chunk_list[1]:
-                uncompleted_size += chunk_list[1] - chunk_list[0]
-        
-        return total_size - uncompleted_size
