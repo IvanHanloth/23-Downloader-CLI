@@ -3,11 +3,12 @@ import time
 import json
 import requests
 from requests.adapters import HTTPAdapter
-from typing import Optional
+# from typing import Optional
 
 from utils.config import Config
 from utils.tools import get_header, get_proxy, get_auth, format_size
 from utils.thread import Thread, ThreadPool
+from utils.error import *
 
 class Downloader:
     def __init__(self, onProgress, onError, onFinish):
@@ -100,7 +101,7 @@ class Downloader:
 
         if not file_size:
             # 无效链接
-            raise Exception("Invalid URL")
+            raise NotValidURL()
 
         chunk_list = self.get_chunk_list(file_size, info["config"]["max_thread"])
 
